@@ -8,39 +8,109 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"gocv.io/x/gocv"
+
+	"github.com/kabukky/h264"
 )
 
 var (
-	h264KeyframeData, _ = hex.DecodeString("0000000167")
-	videoStartData, _   = hex.DecodeString("000102030405060708092828")
-	frameTime           = 40 * time.Millisecond // 25 FPS (40 Milliseconds/Frame)
-	videoCaptureStarted = false
+	h264KeyframeStartData, _ = hex.DecodeString("0000000167")
+	h264KeyframeData, _      = hex.DecodeString("00000001")
+	videoStartData, _        = hex.DecodeString("000102030405060708092828")
+	frameTime                = 40 * time.Millisecond // 25 FPS (40 Milliseconds/Frame)
+	videoCaptureStarted      = false
+
+	currentFrameLock sync.RWMutex
+	currentFrame     *gocv.Mat
 )
 
 type WriteChecker struct {
-	WritingStarted bool
-	Writer         io.Writer
+	Writer  io.Writer
+	Decoder *h264.Decoder
+	Buffer  bytes.Buffer
 }
 
 func (wc *WriteChecker) Write(p []byte) (int, error) {
-	if wc.WritingStarted {
-		return wc.Writer.Write(p)
+	if wc.Decoder != nil {
+		lenP, err := wc.Buffer.Write(p)
+		if err != nil {
+			panic(err)
+		}
+		nals := splitNals(wc.Buffer.Bytes())
+		log.Println("Len nals: ", len(nals))
+		if len(nals) > 1 {
+			// leave last nal for next write
+			for i := 0; i < len(nals)-1; i++ {
+				img, err := wc.Decoder.Decode(nals[i])
+				if err == nil {
+					// log.Println("Bounds: ", img.Bounds())
+					newFrame, err := gocv.ImageToMatRGBA(img)
+					if err != nil {
+						panic(err)
+					}
+					currentFrameLock.Lock()
+					currentFrame = &newFrame
+					currentFrameLock.Unlock()
+					// Got newest image
+					// newFrame, err := gocv.ImageToMatRGB(img)
+					// if err == nil {
+					// 	currentFrameLock.Lock()
+					// 	currentFrame = &newFrame
+					// 	currentFrameLock.Unlock()
+					// } else {
+					// 	panic(err)
+					// }
+				} else {
+					log.Println("\n\n\n------------------\nDECODE FAILED!\n------------\n\n")
+				}
+			}
+		}
+		wc.Buffer.Reset()
+		wc.Buffer.Write(nals[len(nals)-1])
+		return lenP, nil
+		// return wc.Writer.Write(p)
 	}
-	n := len(p)
+	lenP := len(p)
 	// Check if bytes contain key frame
-	keyFrameIndex := bytes.Index(p, h264KeyframeData)
-	if keyFrameIndex == -1 {
+	keyFrameStartIndex := bytes.Index(p, h264KeyframeStartData)
+	if keyFrameStartIndex == -1 {
 		// No keyframe yet. Do not write
-		return n, nil
+		return lenP, nil
 	}
-	log.Println("Starting to write file")
-	wc.WritingStarted = true
-	_, err := wc.Write(p[keyFrameIndex:])
-	videoCaptureStarted = true
-	return n, err
+	log.Println("Starting to write h264")
+	nals := splitNals(p[keyFrameStartIndex:])
+	log.Println("First nals:")
+	for index := range nals {
+		log.Println("\n" + hex.Dump(nals[index]))
+	}
+	var err error
+	wc.Decoder, err = h264.NewDecoder(nals[0])
+	if err != nil {
+		panic(err)
+	}
+	// Write rest to buffer
+	for index := range nals[1:] {
+		_, err = wc.Buffer.Write(nals[index])
+		if err != nil {
+			panic(err)
+		}
+	}
+	return lenP, err
+}
+
+func splitNals(input []byte) [][]byte {
+	var nals [][]byte
+	for i, elem := range bytes.Split(input, h264KeyframeData) {
+		if i == 0 && len(elem) == 0 {
+			// The first bytes were h264KeyframeData. Skip this iteration and append h264KeyframeData to the next element
+			continue
+		}
+		nals = append(nals, append(h264KeyframeData, elem...))
+	}
+	return nals
 }
 
 func main() {
@@ -76,23 +146,25 @@ func main() {
 	}()
 
 	// Start control
-	go startControl()
+	// go startControl()
 
 	// Wait for capture to file to start
 	for {
-		if videoCaptureStarted {
+		if currentFrame != nil {
 			break
 		}
 		time.Sleep(frameTime) // Sleep for a frame and try again
 	}
 
+	log.Println("Video capture started!")
+
 	// Start gocv
-	time.Sleep(frameTime * 4) // Sleep for a few frames so we have a small buffer
-	videoCap, err := gocv.VideoCaptureFile("videotest.h264")
-	if err != nil {
-		panic(err)
-	}
-	defer videoCap.Close()
+	// time.Sleep(frameTime * 1) // Sleep for a few frames so we have a small buffer
+	// videoCap, err := gocv.VideoCaptureFile("videotest.h264")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer videoCap.Close()
 	window := gocv.NewWindow("Hello")
 	defer window.Close()
 	// Recover from panics in main goroutine (gocv) and land the drone safely
@@ -103,8 +175,8 @@ func main() {
 			sendLandData(conn)
 		}
 	}()
-	// showVideo(videoCap, window)
-	trackOpticalFlow(videoCap, window)
+	showVideo(window)
+	// trackOpticalFlow(videoCap, window)
 	// trackObject(videoCap, window)
 	// TODO: Capture SIGINT
 }

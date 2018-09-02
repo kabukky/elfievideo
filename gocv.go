@@ -107,29 +107,28 @@ func trackObject(videoCap *gocv.VideoCapture, window *gocv.Window) {
 	}
 }
 
-func showVideo(videoCap *gocv.VideoCapture, window *gocv.Window) {
-	img := gocv.NewMat()
-	frameSkipRemainder := float64(0)
+func showVideo(window *gocv.Window) {
+	// frameSkipRemainder := float64(0)
+	log.Println("Showing video")
 	for {
-		timeStart := time.Now()
 		// read next image
-		if ok := videoCap.Read(&img); !ok {
-			log.Println("cannot read video file")
-			continue
-		}
+		currentFrameLock.RLock()
+		img := currentFrame.Clone()
+		currentFrameLock.RUnlock()
+		// timeStart := time.Now()
 		if img.Empty() {
 			log.Println("skipping frame")
 			continue
 		}
 		window.IMShow(img)
-		window.WaitKey(1)
-		skipFrames(videoCap, timeStart, &frameSkipRemainder)
+		window.WaitKey(40)
+		// skipFrames(videoCap, timeStart, &frameSkipRemainder)
 	}
 }
 
 func trackOpticalFlow(videoCap *gocv.VideoCapture, window *gocv.Window) {
 	// // color for the flow lines
-	// blue := color.RGBA{0, 0, 255, 0}
+	blue := color.RGBA{0, 0, 255, 0}
 
 	// // Size of flow lines
 	// flowSize := float32(1.0)
@@ -151,26 +150,65 @@ func trackOpticalFlow(videoCap *gocv.VideoCapture, window *gocv.Window) {
 			break
 		}
 	}
-	goodFeatures := gocv.NewMat()
-	defer goodFeatures.Close()
+
+	goodFeaturesTop := gocv.NewMat()
+	goodFeaturesBottom := gocv.NewMat()
+	defer goodFeaturesTop.Close()
+	defer goodFeaturesBottom.Close()
+
 	nextImage := gocv.NewMat()
 	defer nextImage.Close()
+
 	nextImageGrey := gocv.NewMat()
 	defer nextImageGrey.Close()
-	flow := gocv.NewMat()
-	defer flow.Close()
+
+	oldImageGreyTop := gocv.NewMat()
+	oldImageGreyBottom := gocv.NewMat()
+	defer oldImageGreyTop.Close()
+	defer oldImageGreyBottom.Close()
+
+	flowTop := gocv.NewMat()
+	flowBottom := gocv.NewMat()
+	defer flowTop.Close()
+	defer flowBottom.Close()
+
+	xSumTop := float32(0)
+	ySumTop := float32(0)
+	xSumBottom := float32(0)
+	ySumBottom := float32(0)
+	xSum := float32(0)
+
 	status := gocv.NewMat()
 	defer status.Close()
+
 	errors := gocv.NewMat()
 	defer errors.Close()
+
 	trackIterations := 20
-	adjustIterations := 0
 	frameSkipRemainder := float64(0)
+
 	// read next pictures
 	for {
-		if trackIterations >= 20 {
+		if trackIterations >= 5 {
 			// Get features
-			gocv.GoodFeaturesToTrack(oldImageGrey, &goodFeatures, 200, 0.01, 10)
+			halfY := oldImageGrey.Rows() / 2
+			oldImageGreyBottom = oldImageGrey.Clone()
+			// Copy bottom half
+			for y := 0; y < halfY; y++ {
+				for x := 0; x < oldImageGreyBottom.Cols(); x++ {
+					oldImageGreyBottom.SetIntAt(y, x, 0)
+				}
+			}
+			oldImageGreyTop = oldImageGrey.Clone()
+			// Copy top half
+			// For some reason, it will crash if we try to copy the last three rows
+			for y := oldImageGreyTop.Rows() - 4; y >= halfY; y-- {
+				for x := 0; x < oldImageGreyTop.Cols(); x++ {
+					oldImageGreyTop.SetIntAt(y, x, 0)
+				}
+			}
+			gocv.GoodFeaturesToTrack(oldImageGreyTop, &goodFeaturesTop, 150, 0.01, 10)
+			gocv.GoodFeaturesToTrack(oldImageGreyBottom, &goodFeaturesBottom, 150, 0.01, 10)
 			trackIterations = 0
 		}
 		timeStart := time.Now()
@@ -185,38 +223,55 @@ func trackOpticalFlow(videoCap *gocv.VideoCapture, window *gocv.Window) {
 		gocv.CvtColor(nextImage, &nextImageGrey, gocv.ColorBGRToGray)
 
 		// track optical flow
-		gocv.CalcOpticalFlowPyrLK(oldImageGrey, nextImageGrey, goodFeatures, flow, &status, &errors)
+		gocv.CalcOpticalFlowPyrLK(oldImageGrey, nextImageGrey, goodFeaturesTop, flowTop, &status, &errors)
+		gocv.CalcOpticalFlowPyrLK(oldImageGrey, nextImageGrey, goodFeaturesBottom, flowBottom, &status, &errors)
 		//gocv.CalcOpticalFlowFarneback(oldImageGrey, nextImageGrey, &flow, 0.5, 3, 15, 3, 5, 1.2, 0)
 
 		// assign old grey
 		nextImageGrey.CopyTo(&oldImageGrey)
 
 		// goodFeatures will only have one col
-		xSum := float32(0)
-		ySum := float32(0)
-		for row := 0; row < goodFeatures.Rows(); row++ {
-			xSum = xSum + (goodFeatures.GetVecfAt(row, 0)[0] - flow.GetVecfAt(row, 0)[0])
-			ySum = ySum + (goodFeatures.GetVecfAt(row, 0)[1] - flow.GetVecfAt(row, 0)[1])
+		for row := 0; row < goodFeaturesTop.Rows(); row++ {
+			gocv.Line(&nextImage, image.Point{int(goodFeaturesTop.GetVecfAt(row, 0)[0]), int(goodFeaturesTop.GetVecfAt(row, 0)[1])}, image.Point{int(flowTop.GetVecfAt(row, 0)[0]), int(flowTop.GetVecfAt(row, 0)[1])}, blue, 1)
+			xSumTop = xSumTop + (goodFeaturesTop.GetVecfAt(row, 0)[0] - flowTop.GetVecfAt(row, 0)[0])
+			ySumTop = ySumTop + (goodFeaturesTop.GetVecfAt(row, 0)[1] - flowTop.GetVecfAt(row, 0)[1])
 			//log.Printf("0: %v\t1: %v", , )
 		}
-		xSum = xSum / float32(goodFeatures.Rows())
-		ySum = ySum / float32(goodFeatures.Rows())
-		log.Printf("x: %v\ty: %v", xSum, ySum)
+		for row := 0; row < goodFeaturesBottom.Rows(); row++ {
+			gocv.Line(&nextImage, image.Point{int(goodFeaturesBottom.GetVecfAt(row, 0)[0]), int(goodFeaturesBottom.GetVecfAt(row, 0)[1])}, image.Point{int(flowBottom.GetVecfAt(row, 0)[0]), int(flowBottom.GetVecfAt(row, 0)[1])}, blue, 1)
+			xSumBottom = xSumBottom + (goodFeaturesBottom.GetVecfAt(row, 0)[0] - flowBottom.GetVecfAt(row, 0)[0])
+			ySumBottom = ySumBottom + (goodFeaturesBottom.GetVecfAt(row, 0)[1] - flowBottom.GetVecfAt(row, 0)[1])
+			//log.Printf("0: %v\t1: %v", , )
+		}
+		xSumTop = xSumTop / float32(goodFeaturesTop.Rows())
+		ySumTop = ySumTop / float32(goodFeaturesTop.Rows())
+		xSumBottom = xSumBottom / float32(goodFeaturesBottom.Rows())
+		ySumBottom = ySumBottom / float32(goodFeaturesBottom.Rows())
+		// log.Printf("x: %v\ty: %v", xSumTop, ySumTop)
 
-		// Adjust left right
-		if xSum < -10 && adjustIterations > 4 {
+		// Adjust left/right
+		xSum = (xSumTop + xSumBottom) / 2
+		if xSum < -10 {
 			// Drifting to the left
-			log.Println("Adjusting steering to right!")
-			adjustSteering(144, 16, 17)
-			adjustIterations = 0
-		} else if xSum > 10 && adjustIterations > 4 {
+			log.Println("Adjusting steering to right")
+			adjustSteeringRoll(17)
+		} else if xSum > 10 {
 			// Drifting to the right
-			log.Println("Adjusting steering! to left")
-			adjustSteering(144, 16, 15)
-			adjustIterations = 0
+			log.Println("Adjusting steering to left")
+			adjustSteeringRoll(15)
 		}
 
-		// TODO: Adjust forward backward
+		// Adjust forward/backward
+		if ySumTop > 3 && ySumBottom < 0 {
+			// Drifting forward
+			log.Println("Adjusting steering to backward")
+			adjustSteeringPitch(15)
+		} else if ySumTop < -3 && ySumBottom > 0 {
+			// Drifting backwards
+			log.Println("Adjusting steering to forward")
+			adjustSteeringPitch(17)
+		}
+		log.Println("ySumTop: ", ySumTop, "ySumBottom: ", ySumBottom)
 
 		// create flow image
 		// by y += 5, x += 5 you can specify the grid
@@ -228,13 +283,13 @@ func trackOpticalFlow(videoCap *gocv.VideoCapture, window *gocv.Window) {
 		// 	}
 		// }
 
-		flow.CopyTo(&goodFeatures)
+		flowTop.CopyTo(&goodFeaturesTop)
+		flowBottom.CopyTo(&goodFeaturesBottom)
 
 		window.IMShow(nextImage)
 		window.WaitKey(1)
 		skipFrames(videoCap, timeStart, &frameSkipRemainder)
 		trackIterations = trackIterations + 1
-		adjustIterations = adjustIterations + 1
 	}
 }
 

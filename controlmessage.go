@@ -31,6 +31,18 @@ func adjustSteering(yaw uint8, pitch uint8, roll uint8) {
 	steeringBaseDataLock.Unlock()
 }
 
+func adjustSteeringRoll(totalValue uint8) {
+	steeringBaseDataLock.Lock()
+	steeringBaseData[8] = totalValue
+	steeringBaseDataLock.Unlock()
+}
+
+func adjustSteeringPitch(totalValue uint8) {
+	steeringBaseDataLock.Lock()
+	steeringBaseData[7] = totalValue
+	steeringBaseDataLock.Unlock()
+}
+
 // sendSteeringData steers the drone. uplift == up/down, yaw == turn, pitch == forward/backward, roll == sideways
 func sendSteeringData(uplift float32, yaw float32, pitch float32, roll float32, conn net.Conn) {
 	steeringBaseDataLock.Lock()
